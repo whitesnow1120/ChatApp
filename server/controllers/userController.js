@@ -43,13 +43,13 @@ const Home = (req, res) => {
  */
 const Register = (req, res) => {
   try {
-    User.findOne({ username: req.body.username }).then((user) => {
+    User.findOne({ email: req.body.email }).then((user) => {
       if (user) {
-        return res.status(400).json({ message: "Username already exists" });
+        return res.status(400).json({ message: "Account already exists" });
       } else {
         const newUser = new User({
           name: req.body.name,
-          username: req.body.username,
+          email: req.body.email,
           password: req.body.password,
         });
         // Hash password before saving in database
@@ -75,7 +75,7 @@ const Register = (req, res) => {
                       if (err) {
                         console.log("err", err);
                       } else {
-                        req.io.sockets.emit("users", user.username);
+                        req.io.sockets.emit("users", user.email);
                         res.json({
                           success: true,
                           token: "Bearer " + token,
@@ -107,13 +107,13 @@ const Register = (req, res) => {
  */
 const Login = (req, res) => {
   try {
-    const username = req.body.username;
+    const email = req.body.email;
     const password = req.body.password;
-    // Find user by username
-    User.findOne({ username }).then((user) => {
+    // Find user by email
+    User.findOne({ email }).then((user) => {
       // Check if user exists
       if (!user) {
-        return res.status(404).json({ message: "Username not found" });
+        return res.status(404).json({ message: "Account not found" });
       }
       // Check password
       bcrypt.compare(password, user.password).then((isMatch) => {
@@ -138,7 +138,7 @@ const Login = (req, res) => {
                 success: true,
                 token: "Bearer " + token,
                 name: user.name,
-                username: user.username,
+                email: user.email,
                 userId: user._id,
               });
             },
