@@ -1,366 +1,159 @@
-const awsConfig = require("../config/dynamodb");
-const uuid = require("uuid");
-const crypto = require("crypto");
+const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
-const mailgun = require("mailgun-js");
-const DOMAIN = "sandbox782a117890714e45bbd422d474d26731.mailgun.org";
-const mg = mailgun({ apiKey: process.env.MAILGUN_APIKEY, domain: DOMAIN });
+const mongoose = require("mongoose");
 
-const dynamodb = awsConfig.dynamodb;
-const docClient = awsConfig.docClient;
-const tableName = "Users";
-const key = "authentication";
-const digitCodeCount = 6;
+const keys = require("../config/keys");
+const verify = require("../utils/verifyToken");
+const User = require("../models/User");
 
 /**
- * create table (Users)
+ * Home
+ * @param { Object } req
+ * @param { Object } res
+ * @method GET
  */
-const createAuthTable = () => {
+const Home = (req, res) => {
   try {
-    const tablePromise = dynamodb
-      .listTables({})
-      .promise()
-      .then((data) => {
-        const exists =
-          data.TableNames.filter((name) => {
-            return name === tableName;
-          }).length > 0;
-        if (exists) {
-          return Promise.resolve();
-        } else {
-          const params = {
-            TableName: tableName,
-            KeySchema: [
-              { AttributeName: "email", KeyType: "HASH" }, // partition key
-            ],
-            AttributeDefinitions: [
-              { AttributeName: "email", AttributeType: "S" },
-            ],
-            ProvisionedThroughput: {
-              ReadCapacityUnits: 10,
-              WriteCapacityUnits: 10,
-            },
-          };
+    let jwtUser = jwt.verify(verify(req), keys.secretOrKey);
+    let id = mongoose.Types.ObjectId(jwtUser.id);
 
-          return dynamodb.createTable(params, function (err, data) {});
+    User.aggregate()
+      .match({ _id: { $not: { $eq: id } } })
+      .project({ password: 0, __v: 0, date: 0 })
+      .exec((err, users) => {
+        if (err) {
+          console.log(err);
+          res.status(500);
+        } else {
+          res.send(users);
         }
       });
   } catch (err) {
     console.log(err);
+    res.setHeader("Content-Type", "application/json");
+    res.status(401).json({ message: "Unauthorized" });
   }
 };
 
 /**
- * generate hashed password (sha512)
- * @param { string } password 
+ * Register
+ * @param { Object } req
+ * @param { Object } res
+ * @method POST
  */
-const generateHashdPassword = (password) => {
-  const hash = crypto.createHmac("sha512", key);
-  hash.update(password);
-  return hash.digest("hex").toString();
+const Register = (req, res) => {
+  try {
+    User.findOne({ username: req.body.username }).then((user) => {
+      if (user) {
+        return res.status(400).json({ message: "Username already exists" });
+      } else {
+        const newUser = new User({
+          name: req.body.name,
+          username: req.body.username,
+          password: req.body.password,
+        });
+        // Hash password before saving in database
+        bcrypt.genSalt(10, (err, salt) => {
+          bcrypt.hash(newUser.password, salt, (err, hash) => {
+            if (err) {
+              throw err;
+            } else {
+              newUser.password = hash;
+              newUser
+                .save()
+                .then((user) => {
+                  const payload = {
+                    id: user.id,
+                    name: user.name,
+                  };
+                  // Sign token
+                  jwt.sign(
+                    payload,
+                    keys.secretOrKey,
+                    { expiresIn: 31556926 },
+                    (err, token) => {
+                      if (err) {
+                        console.log("err", err);
+                      } else {
+                        req.io.sockets.emit("users", user.username);
+                        res.json({
+                          success: true,
+                          token: "Bearer " + token,
+                          name: user.name,
+                        });
+                      }
+                    },
+                  );
+                })
+                .catch((err) => {
+                  console.log("err", err);
+                });
+            }
+          });
+        });
+      }
+    });
+  } catch (err) {
+    console.log("err", err);
+    res.sendStatus(500);
+  }
 };
 
 /**
- * generate random digit code
- * @param { number } n 
- */
-const randomDigitCode = (n) => {
-  return Math.floor(Math.pow(10, n-1) + Math.random() * 9 * Math.pow(10, n-1));
-}
-
-/**
- * registration
- * @param {*} req
- * @param {*} res
+ * Login
+ * @param { Object } req
+ * @param { Object } res
  * @method POST
  */
-const registration = (req, res) => {
+const Login = (req, res) => {
   try {
-    const params = {
-      TableName: tableName,
-      Key: {
-        email: req.body.email,
-      },
-    };
-
-    // check email is exist or not
-    docClient.get(params, function (err, data) {
-      if (err) {
-        res.status(err.statusCode).json({ result: err.message });
-      } else {
-        if (data.Item == undefined) {
-          // create hash password
-          const name = req.body.name;
-          const email = req.body.email;
-          const password = generateHashdPassword(req.body.password);
-
-          const token = jwt.sign(
-            { name, email, password },
-            process.env.JWT_ACC_ACTIVE,
-            { expiresIn: "20m" },
+    const username = req.body.username;
+    const password = req.body.password;
+    // Find user by username
+    User.findOne({ username }).then((user) => {
+      // Check if user exists
+      if (!user) {
+        return res.status(404).json({ message: "Username not found" });
+      }
+      // Check password
+      bcrypt.compare(password, user.password).then((isMatch) => {
+        if (!isMatch) {
+          return res.status(400).json({ message: "Password incorrect" });
+        } else {
+          // User matched
+          // Create JWT payload
+          const payload = {
+            id: user.id,
+            name: user.name,
+          };
+          // Sign token
+          jwt.sign(
+            payload,
+            keys.secretOrKey,
+            {
+              expiresIn: 31556926, // 1 year in seconds
+            },
+            (err, token) => {
+              res.json({
+                success: true,
+                token: "Bearer " + token,
+                name: user.name,
+                username: user.username,
+                userId: user._id,
+              });
+            },
           );
-
-          const data = {
-            from: "noreply@hello.com",
-            to: email,
-            subject: "Account Activiation Link",
-            html: `
-              <h2>Please click on given link to activate your account</h2>
-              <p>${process.env.CLIENT_URL}/auth/activate/${token}</p>
-            `,
-          };
-          sendMail(data, res);
-        } else {
-          res.status(400).json({
-            result: "Account exists",
-          });
         }
-      }
+      });
     });
   } catch (err) {
-    res.status(500).json({ error: err });
-  }
-};
-
-/**
- * send email to the user
- * @param {*} data
- * @param {*} res
- */
-const sendMail = (data, res) => {
-  mg.messages().send(data, function (err, body) {
-    if (err) {
-      return res.status(403).json({ result: "Email sending Error" });
-    }
-    return res.status(200).json({ result: "Email has been sent" });
-  });
-};
-
-/**
- * activate account (simply click on the given link)
- * @param {*} req
- * @param {*} res
- * @method POST
- */
-const activateAccount = (req, res) => {
-  try {
-    const token = req.url.split("/")[2];
-    if (token) {
-      jwt.verify(
-        token,
-        process.env.JWT_ACC_ACTIVE,
-        function (err, decodedToken) {
-          if (err) {
-            return res
-              .status(400)
-              .json({ result: "Incorrect or Expired Link" });
-          }
-          const { name, email, password } = decodedToken;
-          const paramsWrite = {
-            TableName: tableName,
-            Item: {
-              uid: uuid.v1(),
-              email: email,
-              name: name,
-              password: password,
-              createdAt: Date().toString(),
-              updatedAt: Date().toString(),
-              authtoken: token,
-            },
-          };
-
-          docClient.put(paramsWrite, function (err, data) {
-            if (err) {
-              res.status(403).json({ result: "Invalid credentail" });
-            } else {
-              res.status(200).json({ result: "Activated" });
-            }
-          });
-        },
-      );
-    }
-  } catch (err) {
-    res.status(500).json({ error: err });
-  }
-};
-
-/**
- * login
- * @param {*} req
- * @param {*} res
- * @method GET
- */
-const login = (req, res) => {
-  try {
-    const hashed_password = generateHashdPassword(req.query.password);
-
-    const params = {
-      TableName: tableName,
-      Key: {
-        email: req.query.email,
-      },
-    };
-
-    docClient.get(params, function (err, data) {
-      if (err) {
-        res.status(err.statusCode).json({ result: err.message });
-      } else {
-        if (data.Item == undefined) {
-          res
-            .status(400)
-            .json({ result: "User with this account does not exist" });
-        } else {
-          if (hashed_password === data.Item.password) {
-            res.status(200).send({
-              userId: data.Item.uid,
-              name: data.Item.name,
-              createdAt: data.Item.createdAt,
-              updatedAt: data.Item.updatedAt,
-            });
-          } else {
-            res.status(403).json({
-              result: "Credentials are incorrect",
-            });
-          }
-        }
-      }
-    });
-  } catch (err) {
-    res.status(500).json({ error: err });
-  }
-};
-
-/**
- * Generate a reset password token and send email to the user
- * @param {*} req
- * @param {*} res
- * @method POST
- */
-const forgotPassword = (req, res) => {
-  try {
-    const email = req.body.email;
-    let params = {
-      TableName: tableName,
-      Key: {
-        email: email,
-      },
-    };
-
-    // check email is exist or not
-    docClient.get(params, function (err, data) {
-      if (err) {
-        res.status(err.statusCode).json({ result: err.message });
-      } else {
-        if (data.Item != undefined) {
-          const token = randomDigitCode(digitCodeCount);
-          const emailData = {
-            from: "noreply@hello.com",
-            to: email,
-            subject: "6 digit code",
-            html: `<p>${token}</p>`,
-          };
-          // update user (token)
-          params = {
-            TableName: tableName,
-            Key: {
-              email: email,
-            },
-            UpdateExpression: "set authtoken = :authtoken, updatedAt = :updatedAt",
-            ExpressionAttributeValues: {
-              ":authtoken": token,
-              ":updatedAt": Date().toString(),
-            },
-            ReturnValues: "UPDATED_NEW",
-          };
-
-          docClient.update(params, function (err, data) {
-            if (err) {
-              res.status(err.statusCode).json({ error: err.message });
-            } else {
-              sendMail(emailData, res);
-            }
-          });
-        } else {
-          res.status(400).json({
-            result: "User with this email doesn't exist",
-          });
-        }
-      }
-    });
-  } catch (err) {
-    res.status(500).json({ error: err });
-  }
-};
-
-/**
- * reset the password
- * @param {*} req
- * @param {*} res
- * @method POST
- */
-const resetPassword = (req, res) => {
-  try {
-    const { token, email, newPassword } = req.body;
-    // get token and updatedAt in db
-    let params = {
-      TableName: tableName,
-      Key: {
-        email: email,
-      },
-    };
-
-    docClient.get(params, function (err, data) {
-      if (err) {
-        res.status(err.statusCode).json({ result: err.message });
-      } else {
-        if (data.Item == undefined) {
-          res
-            .status(400)
-            .json({ result: "User with this account does not exist" });
-        } else {
-          const lastUpdatedAt = new Date(data.Item.updatedAt)
-          const diffSeconds = (new Date().getTime() - lastUpdatedAt.getTime()) / 1000;
-          if (token != data.Item.authtoken) {
-            res.status(400).json({ result: "Invalid token"});
-          } else if (diffSeconds > 1200) { // expire time is "20m"
-            res.status(400).json({ result: "Token is expired"});
-          } else {
-            params = {
-              TableName: tableName,
-              Key: {
-                email: email,
-              },
-              UpdateExpression:
-                "set password = :password, updatedAt=:updatedAt, authtoken=:authtoken",
-              ExpressionAttributeValues: {
-                ":password": generateHashdPassword(newPassword),
-                ":updatedAt": Date().toString(),
-                ":authtoken": "",
-              },
-              ReturnValues: "UPDATED_NEW",
-            };
-
-            docClient.update(params, function (err, data) {
-              if (err) {
-                res.status(err.statusCode).json({ error: err.message });
-              } else {
-                res.status(200).json({ result: "Password is changed" });
-              }
-            });
-          }
-        }
-      }
-    });
-  } catch (err) {
-    res.status(500).json({ error: err });
+    console.log("err", err);
+    res.status(500);
   }
 };
 
 module.exports = {
-  createAuthTable,
-  registration,
-  forgotPassword,
-  login,
-  activateAccount,
-  resetPassword,
+  Home,
+  Register,
+  Login,
 };

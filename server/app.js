@@ -3,19 +3,27 @@ const mongoose = require("mongoose");
 const bodyParser = require("body-parser");
 const passport = require("passport");
 const cors = require("cors");
+const dotenv = require("dotenv");
+const socket = require("socket.io");
+dotenv.config();
 
-const users = require("./controllers/users");
+const users = require("./routes/users");
 
 const app = express();
 
 // Port that the webserver listens to
-const port = process.env.port || 5000;
+const port = process.env.PORT || 5000;
 
-const server = app.listen(port, () =>
-  console.log(`Server running on Port ${port}`),
-);
+const server = app.listen(port, () => {
+  console.log(`App is running on ${port}`);
+});
 
-const io = require("socket.io").listen(server);
+// Socket setup
+const io = socket(server);
+
+io.on("connection", function (socket) {
+  console.log("Made socket connection");
+});
 
 app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
@@ -40,6 +48,7 @@ app.use(passport.initialize());
 // Passport config
 require("./config/passport")(passport);
 
+
 // Assign socket object to every request
 app.use(function (req, res, next) {
   req.io = io;
@@ -47,4 +56,6 @@ app.use(function (req, res, next) {
 });
 
 // Routes
-app.use("./routes/users", users);
+app.use("/users", users);
+
+module.exports = app;
